@@ -12,6 +12,7 @@ import rsa
 import requests
 import threading
 import shutil
+import time
 
 import logging
 from weibo_conf import UID, THREAD, USER_ID, USER_PWD
@@ -27,8 +28,7 @@ session = requests.session()
 session.headers['User-Agent'] = user_agent
 ALBUM_ID = -1
 mylock = threading.RLock()
-retry_list = set()
-
+retry_list = []
 
 def encrypt_passwd(passwd, pubkey, servertime, nonce):
     key = rsa.PublicKey(int(pubkey, 16), int('10001', 16))
@@ -83,10 +83,28 @@ def wblogin(username, password):
     login_str = re.match(r'[^{]+({.+?}})', resp.content).group(1)
     #return json.loads(login_str)
     for uid in UID:
+        print '========================================================================='
+        print 'Downloading %s\'s photos' % uid
         get_album_id(uid)
         picname_list = []
         page = 1
-        while True:
+
+        sort_dir = str(uid)
+        if not os.path.exists('./' + sort_dir):
+            os.mkdir('./' + sort_dir)        
+        id_list = get_idlist(sort_dir)
+        isFirsttime = False
+        if len(id_list) == 0:
+            isFirsttime = True
+            pass
+        else:
+            id_list = [ids.strip() for ids in id_list]
+       
+        print 'Parsing...'
+        print 'page ',
+        while isFirsttime or page < 5:
+            print ' %2d' % page,
+
             des_url = 'http://photo.weibo.com/photos/get_all?uid=%s&album_id=%s&count=30&page=%s&type=3' % (
                 uid, ALBUM_ID, page)
             resp = session.get(des_url)
@@ -94,24 +112,38 @@ def wblogin(username, password):
             if len(rep_data) == 0:
                 break
             for each in rep_data:
+
+                caption = each['caption_render']
+                createdtime = each['created_at']
+                picname = each['pic_name']
+                pichost = each['pic_host']
+                fmt = picname.split('.')[-1]
+                if not fmt in ['jpg', 'gif', 'png', 'bmp', 'jpeg', 'tif']:
+                    picname = picname + '.jpg'
+
+                if picname in id_list:
+                    continue
+
+                if re.search(ur'分钟', createdtime) or re.search(ur'今天', createdtime):
+                    createdtime = time.strftime('%Y%m%d', time.localtime(time.time()))
+                elif re.search(ur'月', createdtime):
+                    m = re.search(ur'([0-9]+)月([0-9]+)日', createdtime)
+                    createdtime = '%s%02d%02d'%(time.strftime('%Y', time.localtime(time.time())),
+                                            int(m.group(1)),
+                                            int(m.group(2))
+                                            )
+                else:
+                    createdtime = createdtime.replace('-','')
+
+                pic = (createdtime, caption, picname, pichost)
                 try:
-                    if each['pic_name'] not in picname_list:
-                        picname_list.append(each['pic_name'])
+                    if pic not in picname_list:
+                        picname_list.append(pic)
                 except:
                     pass
             page += 1
-        sort_dir = str(uid)
-        if not os.path.exists('./' + sort_dir):
-            os.mkdir('./' + sort_dir)
 
-        id_list = get_idlist(sort_dir)
-        if id_list == None:
-            pass
-        else:
-            id_list = [ids.strip() for ids in id_list]
-            picname_list = set(picname_list) - set(id_list)
-            picname_list = list(picname_list)
-
+        print ' '
         print '%s new photos has been found since last update! ' % len(picname_list)
         # 如果没有新增数据则直接返回进行下一次循环
         if len(picname_list) == 0:
@@ -127,7 +159,8 @@ def wblogin(username, password):
             each.start()
         for each in thread:
             each.join()
-        done_list = list(set(picname_list) - retry_list)
+
+        done_list = list(set(picname_list) - set(retry_list))
         set_idlist(sort_dir, list(done_list))
 
         while len(retry_list) != 0:
@@ -169,38 +202,54 @@ def div_list(picname_list):
     global THREAD
     if sum < THREAD:
         THREAD = sum
-    size = len(picname_list) / int(THREAD) + 1
-    l = [picname_list[i:i + int(size)] for i in range(0, len(picname_list), size)]
+    size = int((len(picname_list) + THREAD -1) / THREAD) # round up
+    l = [picname_list[i:i + size] for i in range(0, len(picname_list), size)]
+
     return l
 
 
 def download(picname_list, sort_dir, index):
-    i = 0
-    for picname in picname_list[index]:
-        download_url = 'http://ww3.sinaimg.cn/large/%s.jpg' % picname
+    for (createdtime, caption, picname, pichost) in picname_list[index]:
+
+        download_url = '%s/large/%s' % (pichost, picname)
+        if len(caption) > 168:
+            caption = caption[0:167] + u'…'
+        filename = createdtime + '.' + caption +'.' + picname
+        filename = clean_filename(filename)
+
         try:
-            urllib.urlretrieve(download_url, './' + sort_dir + '/' + picname)
-        except:
+            urllib.urlretrieve(download_url, './' + sort_dir + '/' + filename)
+        except Exception,e:
+            print e
             mylock.acquire()
-            retry_list.add(picname)
+            retry_list.append((createdtime, caption, picname, pichost))
             mylock.release()
-            sys.stderr.write('%s has download failed, add to retry queue!' % picname)
+            sys.stderr.write('%s  download failed, add to retry queue!' % picname)
             continue
-        print 'Download ' + picname + ' successed.'
+        print 'Download ' + picname + ' successful.'
 
 
 def retry_download(picname_list, sort_dir):
     '''retry to download the failed task untile all the image has been dowload successfuly.
     '''
-    for picname in picname_list:
-        download_url = 'http://ww3.sinaimg.cn/large/%s.jpg' % picname
+    for (createdtime, caption, picname, pichost) in picname_list:
+
+        download_url = '%s/large/%s' % (pichost, picname)
+        if len(caption) > 168:
+            caption = caption[0:167] + u'…'
+        filename = createdtime + '.' + caption +'.' + picname
+        filename = clean_filename(filename)
+
         try:
-            urllib.urlretrieve(download_url, './' + sort_dir + '/' + picname + '.jpg')
-            retry_list.remove(picname)
-        except:
+            urllib.urlretrieve(download_url, './' + sort_dir + '/' + filename)
+        except Exception,e:
+            print e
             sys.stderr.write('%s has download failed, add to retry queue!' % picname)
             continue
-        print 'Download ' + picname + ' successed.'
+        mylock.acquire()
+        retry_list.remove((createdtime, caption, picname, pichost))
+        mylock.release()
+        print 'Download ' + picname + ' successful.'
 
 
 def get_idlist(sort_dir):
@@ -222,7 +271,7 @@ def set_idlist(sort_dir, ids):
     '''
     filename = os.path.join(sort_dir, 'id_list.log')
     f = open(filename, 'a')
-    ids = [herf + '\n' for herf in ids]
+    ids = [picname + '\n' for (createdtime, caption, picname, pichost) in ids]
 
     f.writelines(ids)
     f.close()
@@ -232,8 +281,30 @@ def get_album_id(UID):
     url = 'http://photo.weibo.com/albums/get_all?uid=%s&page=1&count=20' % UID
     rep = session.get(url)
     ALBUM_ID = rep.json()['data']['album_list'][0]['album_id']
-    print ALBUM_ID
 
+
+def clean_filename(s, minimal_change=True):
+    """
+    Sanitize a string to be used as a filename.
+
+    If minimal_change is set to true, then we only strip the bare minimum of
+    characters that are problematic for filesystems (namely, ':', '/' and
+    '\x00', '\n').
+    """
+
+    # strip paren portions which contain trailing time length (...)
+    s = s.replace(':', '_').replace('/', '_').replace('\x00', '_').replace('\n', '').replace('\\','').replace('*','').replace('>','').replace('<','').replace('?','').replace('\"','').replace('|','')
+
+    if minimal_change:
+        return s
+
+    s = re.sub(r"\([^\(]*$", '', s)
+    s = s.replace('&nbsp;', '')
+    s = s.replace('?','')
+    s = s.replace('"','\'')
+    s = s.strip().replace(' ', '_')
+
+    return s
 
 if __name__ == '__main__':
     from pprint import pprint
