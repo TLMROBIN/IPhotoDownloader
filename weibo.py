@@ -13,20 +13,9 @@ import requests
 import threading
 import shutil
 import time
-
 import logging
-from weibo_conf import UID, THREAD, USER_ID, USER_PWD
-#logging.basicConfig(level=logging.DEBUG)
+import errno
 
-
-WBCLIENT = 'ssologin.js(v1.4.5)'
-user_agent = (
-    'Mozilla/5.0 (Windows NT 5.1) AppleWebKit/536.11 (KHTML, like Gecko) '
-    'Chrome/20.0.1132.57 Safari/536.11'
-)
-session = requests.session()
-session.headers['User-Agent'] = user_agent
-ALBUM_ID = -1
 mylock = threading.RLock()
 retry_list = []
 
@@ -37,7 +26,16 @@ def encrypt_passwd(passwd, pubkey, servertime, nonce):
     return binascii.b2a_hex(passwd)
 
 
-def wblogin(username, password):
+def get_weibo_images(target_usr_list, username, password, thread_num = 20):
+    
+    WBCLIENT = 'ssologin.js(v1.4.5)'
+    user_agent = (
+        'Mozilla/5.0 (Windows NT 5.1) AppleWebKit/536.11 (KHTML, like Gecko) '
+        'Chrome/20.0.1132.57 Safari/536.11'
+    )
+    session = requests.session()
+    session.headers['User-Agent'] = user_agent
+
     resp = session.get(
         'http://login.sina.com.cn/sso/prelogin.php?'
         'entry=sso&callback=sinaSSOController.preloginCallBack&'
@@ -82,16 +80,20 @@ def wblogin(username, password):
     resp = session.get(login_url)
     login_str = re.match(r'[^{]+({.+?}})', resp.content).group(1)
     #return json.loads(login_str)
-    for uid in UID:
+    for (uid, uname) in target_usr_list:
+
+        uname = clean_filename(uname)
+        if len(uname) == 0:
+            uname = clean_filename(str(uid))
+
         print '========================================================================='
-        print 'Downloading %s\'s photos' % uid
-        get_album_id(uid)
+        print 'Downloading %s\'s photos' % uname
+        album_id = get_album_id(session, uid)
         picname_list = []
         page = 1
-
-        sort_dir = str(uid)
-        if not os.path.exists('./' + sort_dir):
-            os.mkdir('./' + sort_dir)        
+        
+        sort_dir = os.path.join('.', 'weibo.photo', uname)
+        mkdir_p(sort_dir)
         id_list = get_idlist(sort_dir)
         isFirsttime = False
         if len(id_list) == 0:
@@ -106,7 +108,7 @@ def wblogin(username, password):
             print ' %2d' % page,
 
             des_url = 'http://photo.weibo.com/photos/get_all?uid=%s&album_id=%s&count=30&page=%s&type=3' % (
-                uid, ALBUM_ID, page)
+                uid, album_id, page)
             resp = session.get(des_url)
             rep_data = resp.json()['data']['photo_list']
             if len(rep_data) == 0:
@@ -149,8 +151,8 @@ def wblogin(username, password):
         if len(picname_list) == 0:
             continue
 
-        # 传入整个list的大小，如果大于配置文件中的数值则按THREAD分片，否则按照list大小分片
-        picname_list_div = div_list(picname_list)
+        # 传入整个list的大小，如果大于配置文件中的数值则按 THREAD 数目分片，否则按照 list 大小分片
+        picname_list_div = div_list(picname_list, thread_num)
         thread = []
         times = len(picname_list_div)
         for i in range(times):
@@ -168,7 +170,7 @@ def wblogin(username, password):
             threads = []
             # 分多线程进行重试
             picname_list_div = []
-            picname_list_div = div_list(retry_list)
+            picname_list_div = div_list(retry_list, thread_num)
             for i in range(len(picname_list_div)):
                 t = threading.Thread(target=retry_download, args=(list(picname_list_div[i]), sort_dir))
                 threads.append(t)
@@ -195,14 +197,13 @@ class dojob(threading.Thread):
         self.func(self.picname_list, self.sort_dir, self.index)
 
 
-def div_list(picname_list):
-    '''divide the list into small lists, if sum < THREAD then divide by sum
+def div_list(picname_list, thread_num):
+    '''divide the list into small lists, if sum < thread_num then divide by sum
     '''
     sum = len(picname_list)
-    global THREAD
-    if sum < THREAD:
-        THREAD = sum
-    size = int((len(picname_list) + THREAD -1) / THREAD) # round up
+    if sum < thread_num:
+        thread_num = sum
+    size = int((len(picname_list) + thread_num -1) / thread_num) # round up
     l = [picname_list[i:i + size] for i in range(0, len(picname_list), size)]
 
     return l
@@ -216,9 +217,9 @@ def download(picname_list, sort_dir, index):
             caption = caption[0:167] + u'…'
         filename = createdtime + '.' + caption +'.' + picname
         filename = clean_filename(filename)
-
+        fn = os.path.join(sort_dir, filename)
         try:
-            urllib.urlretrieve(download_url, './' + sort_dir + '/' + filename)
+            urllib.urlretrieve(download_url, fn)
         except Exception,e:
             print e
             mylock.acquire()
@@ -239,9 +240,9 @@ def retry_download(picname_list, sort_dir):
             caption = caption[0:167] + u'…'
         filename = createdtime + '.' + caption +'.' + picname
         filename = clean_filename(filename)
-
+        fn = os.path.join(sort_dir, filename)
         try:
-            urllib.urlretrieve(download_url, './' + sort_dir + '/' + filename)
+            urllib.urlretrieve(download_url, fn)
         except Exception,e:
             print e
             sys.stderr.write('%s has download failed, add to retry queue!' % picname)
@@ -277,11 +278,45 @@ def set_idlist(sort_dir, ids):
     f.close()
 
 
-def get_album_id(UID):
+def get_album_id(session, UID):
     url = 'http://photo.weibo.com/albums/get_all?uid=%s&page=1&count=20' % UID
     rep = session.get(url)
-    ALBUM_ID = rep.json()['data']['album_list'][0]['album_id']
+    return rep.json()['data']['album_list'][0]['album_id']
 
+def get_page(session, url):
+    """
+    Download an HTML page using the requests session.
+    """
+
+    r = session.get(url)
+
+    try:
+        r.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        logging.error("Error %s getting page %s", e, url)
+        r = session.get(url)
+        try:
+            msg = 'Error getting page, retry in {0} seconds ...'
+            print(msg.format(3))
+            time.sleep(3)
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            logging.error("Error %s getting page %s", e, url)
+            raise
+    return r.text
+
+def mkdir_p(path, mode=0o777):
+    """
+    Create subdirectory hierarchy given in the paths argument.
+    """
+
+    try:
+        os.makedirs(path, mode)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else:
+            raise
 
 def clean_filename(s, minimal_change=True):
     """
@@ -307,6 +342,11 @@ def clean_filename(s, minimal_change=True):
     return s
 
 if __name__ == '__main__':
-    from pprint import pprint
 
-    pprint(wblogin(USER_ID, USER_PWD))
+    weibo_target_usr_list = [('2432143202', u'度娘'),
+                             # ('user ID', 'something like nickname'),
+                            ]
+
+    username='your weibo user_email: xxx@xxx.xxx'
+    password='your password'
+    get_weibo_images(weibo_target_usr_list, username, password)
