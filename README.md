@@ -1,7 +1,5 @@
-wbi_downloader
-==============
+IPhotoDownloader
+==========
 
-Download all the imgs from one sina.weibo account
-
-auth：Gao lei
-email：gldamao@gmail.com
+1. Download photos from `weibo.com` by user_id
+2. Download photos from `instagram.com` by user_id
