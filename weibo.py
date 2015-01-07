@@ -15,6 +15,7 @@ import shutil
 import time
 import logging
 import errno
+import argparse
 
 mylock = threading.RLock()
 retry_list = []
@@ -26,7 +27,7 @@ def encrypt_passwd(passwd, pubkey, servertime, nonce):
     return binascii.b2a_hex(passwd)
 
 
-def get_weibo_images(target_usr_list, username, password, thread_num = 20):
+def get_weibo_images(target_usr_list, username, password, thread_num=20, path='.'):
     
     WBCLIENT = 'ssologin.js(v1.4.5)'
     user_agent = (
@@ -92,7 +93,7 @@ def get_weibo_images(target_usr_list, username, password, thread_num = 20):
         picname_list = []
         page = 1
         
-        sort_dir = os.path.join('.', 'weibo.photo', uname)
+        sort_dir = os.path.join(path, 'weibo.photo', uname)
         mkdir_p(sort_dir)
         id_list = get_idlist(sort_dir)
         isFirsttime = False
@@ -162,10 +163,8 @@ def get_weibo_images(target_usr_list, username, password, thread_num = 20):
         for each in thread:
             each.join()
 
-        done_list = list(set(picname_list) - set(retry_list))
-        set_idlist(sort_dir, list(done_list))
-
-        while len(retry_list) != 0:
+        attempts_times = 1
+        while len(retry_list) != 0 and attempts_times < 5:
             print 'Now retrying download the [ %s ] failed task!!!' % len(retry_list)
             threads = []
             # 分多线程进行重试
@@ -180,9 +179,18 @@ def get_weibo_images(target_usr_list, username, password, thread_num = 20):
             for i in threads:
                 i.join()
 
+            attempts_times += 1
+
         else:
             pass
-        print 'All %s \'s download job has been done.' % uid
+
+        done_list = list(set(picname_list) - set(retry_list))
+        set_idlist(sort_dir, list(done_list))
+
+        if len(retry_list)== 0:
+            print 'All %s \'s download job has been done.' % uname
+        else:
+            print '%d items failed.' % len(retry_list)
 
 
 class dojob(threading.Thread):
@@ -213,9 +221,15 @@ def download(picname_list, sort_dir, index):
     for (createdtime, caption, picname, pichost) in picname_list[index]:
 
         download_url = '%s/large/%s' % (pichost, picname)
-        if len(caption) > 168:
-            caption = caption[0:167] + u'…'
-        filename = createdtime + '.' + caption +'.' + picname
+
+        cur_dir_length = len(os.path.abspath(sort_dir))
+        max_cap_length = 255 - len(createdtime) - len(picname) - cur_dir_length - 3
+        if len(caption) > max_cap_length:
+            tmp_caption = caption[0:max_cap_length] + u'…'
+        else:
+            tmp_caption = caption
+
+        filename = createdtime + '.' + tmp_caption +'.' + picname
         filename = clean_filename(filename)
         fn = os.path.join(sort_dir, filename)
         try:
@@ -236,9 +250,15 @@ def retry_download(picname_list, sort_dir):
     for (createdtime, caption, picname, pichost) in picname_list:
 
         download_url = '%s/large/%s' % (pichost, picname)
-        if len(caption) > 168:
-            caption = caption[0:167] + u'…'
-        filename = createdtime + '.' + caption +'.' + picname
+
+        cur_dir_length = len(os.path.abspath(sort_dir))
+        max_cap_length = 255 - len(createdtime) - len(picname) - cur_dir_length - 3
+        if len(caption) > max_cap_length:
+            tmp_caption = caption[0:max_cap_length] + u'…'
+        else:
+            tmp_caption = caption
+
+        filename = createdtime + '.' + tmp_caption +'.' + picname
         filename = clean_filename(filename)
         fn = os.path.join(sort_dir, filename)
         try:
@@ -341,12 +361,67 @@ def clean_filename(s, minimal_change=True):
 
     return s
 
+def parse_args():
+
+    parser = argparse.ArgumentParser(description = 'Download photos from Weibo by user uid')
+
+    parser.add_argument('-u',
+                        '--username',
+                        dest='username',
+                        action='store',
+                        default=None,
+                        help='username')
+
+    parser.add_argument('-p',
+                        '--password',
+                        dest='password',
+                        action='store',
+                        default=None,
+                        help='password')
+
+    parser.add_argument('uid',
+                        action='store',
+                        nargs='+',
+                        help='(e.g. "2432143202")')
+
+    # optional
+    parser.add_argument('-n',
+                        '--nickname',
+                        dest='nickname',
+                        action='store',
+                        default='',
+                        help='nickname of the id, would be name of directory')
+
+    parser.add_argument('--path',
+                        dest='path',
+                        action='store',
+                        default='.',
+                        help='path to save the files')
+
+    parser.add_argument('-t',
+                        '--threadnum',
+                        dest='threadnum',
+                        action='store',
+                        default='20',
+                        help='the numbers of threads generated to download photos')
+    
+    args = parser.parse_args()
+    
+
+    return args
+
 if __name__ == '__main__':
 
-    weibo_target_usr_list = [('2432143202', u'度娘'),
-                             # ('user ID', 'something like nickname'),
-                            ]
+    args = parse_args() 
+    if args.username is None:
+        print ('No username specified.')
+        sys.exit(1)
+    if args.password is None:
+        print ('No password specified.')
+        sys.exit(1)
 
-    username='your weibo user_email: xxx@xxx.xxx'
-    password='your password'
-    get_weibo_images(weibo_target_usr_list, username, password)
+    get_weibo_images([(args.uid[0], args.nickname)],
+                     args.username,
+                     args.password,
+                     path=args.path,
+                     thread_num=int(args.threadnum))

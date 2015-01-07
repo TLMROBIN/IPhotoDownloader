@@ -10,6 +10,7 @@ import os
 import sys
 import logging
 import errno
+import argparse
 
 PHOTOS_PER_PAGE = 20
 user_agent = 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.71 Safari/537.36'
@@ -19,11 +20,11 @@ retry_list = []
 done_list = []
 web_url = "http://websta.me"
 base_url = "http://websta.me/n/"
-video_url_regex = r'/video/\?url=(?P<vlink>.+)$'
-time_img_created_regex = r'data-utime=\"(?P<utime>\d+)\"'
-img_real_url_regex = r'<a href=\"(?P<img_real_url>.+)\" class="mainimg cb_ajax">'
 
-def get_instagram_images(target_usr_list, thread_num=20):
+time_img_created_regex = r'data-utime=\"(?P<utime>\d+)\"'
+
+
+def get_instagram_images(target_usr_list, path='.', thread_num=20):
 
 
 
@@ -36,7 +37,7 @@ def get_instagram_images(target_usr_list, thread_num=20):
         print '========================================================================='
         print 'Downloading %s\'s photos' % uname
 
-        sort_dir = os.path.join('.', 'instagram.photo', uname)
+        sort_dir = os.path.join(path, 'instagram.photo', uname)
         mkdir_p(sort_dir)
         id_list = get_idlist(sort_dir)
         isFirsttime = False
@@ -75,9 +76,8 @@ def get_instagram_images(target_usr_list, thread_num=20):
                 # get real video url
                 video_element = photo_item.find('a', {'class': 'fancy-video video-link  fancybox.ajax toShow hide'})
                 if video_element is not None:
-                    rawurl = video_element.get('href')
-                    video_url = urllib.unquote(
-                        re.search(video_url_regex, rawurl).group('vlink'))
+
+                    video_url = video_element.get('href')
 
                     # check if the video had already been downloaded
                     video_id = video_url.split('/')[-1]
@@ -186,12 +186,6 @@ def download(session, pic_list, sort_dir):
             img_time = time.strftime('%Y%m%d%H%M', time.gmtime(float(utime)))
             logging.info('img_time: %s', img_time)
 
-            # get real img url
-            s = re.search(img_real_url_regex, img_page)
-            if s is not None:
-                img_real_url = s.group('img_real_url')
-                assert img_real_url == pic_url
-
             # max length of filename including path defined by windows is 256
             # cut the caption str if needed
             cur_dir_length = len(os.path.abspath(sort_dir))
@@ -227,12 +221,6 @@ def retry_download(session, picname_list, sort_dir):
             utime = re.search(time_img_created_regex, img_page).group('utime')
             img_time = time.strftime('%Y%m%d%H%M', time.gmtime(float(utime)))
             logging.info('img_time: %s', img_time)
-
-            # get real img url
-            s = re.search(img_real_url_regex, img_page)
-            if s is not None:
-                img_real_url = s.group('img_real_url')
-                assert img_real_url == pic_url
 
             # max length of filename including path defined by windows is 256
             # cut the caption str if needed
@@ -319,7 +307,7 @@ def clean_filename(s, minimal_change=True):
     return s
 
 
-def get_page(session, url, retry_times=3):
+def get_page(session, url, retry_times=3, timeout=10):
     """
     Download an HTML page using the requests session.
     """
@@ -328,7 +316,7 @@ def get_page(session, url, retry_times=3):
         attempts_times += 1
         
         try:
-            r = session.get(url)
+            r = session.get(url, timeout=timeout)
             r.raise_for_status()
         except Exception as e:
             if attempts_times >= retry_times:
@@ -356,11 +344,45 @@ def mkdir_p(path, mode=0o777):
         else:
             raise
 
+def parse_args():
+
+    parser = argparse.ArgumentParser(description = 'Download photos from Instagram by user id')
+
+    parser.add_argument('target_user_id',
+                        action='store',
+                        nargs='+',
+                        help='ID of the one who you are interested in. (e.g. "minchen333")')
+
+    # optional
+    parser.add_argument('-n',
+                        '--nickname',
+                        dest='nickname',
+                        action='store',
+                        default='',
+                        help='nickname of the id, would be name of directory')
+
+    parser.add_argument('--path',
+                        dest='path',
+                        action='store',
+                        default='.',
+                        help='path to save the files')
+
+    parser.add_argument('-t',
+                        '--threadnum',
+                        dest='threadnum',
+                        action='store',
+                        default='20',
+                        help='the numbers of threads generated to download photos')
+    
+    args = parser.parse_args()
+    
+
+    return args
 
 if __name__ == '__main__':
 
-    target_usr_list = [('minchen333', u'明祯'),
-                       # ('user ID', 'something like nickname'),
-                       ]
+    args = parse_args()   
 
-    get_instagram_images(target_usr_list, threadsnum=20)
+    get_instagram_images([(args.target_user_id[0], args.nickname)],
+                         path=args.path,
+                         thread_num=int(args.threadnum))
