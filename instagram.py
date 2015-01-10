@@ -3,7 +3,6 @@
 import requests
 import urllib
 import re
-from bs4 import BeautifulSoup
 import threading
 import time
 import os
@@ -11,22 +10,21 @@ import sys
 import logging
 import errno
 import argparse
+import json
 
-PHOTOS_PER_PAGE = 20
 user_agent = 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.71 Safari/537.36'
 
 mylock = threading.RLock()
 retry_list = []
-done_list = []
-web_url = "http://websta.me"
-base_url = "http://websta.me/n/"
+
+web_url = "http://instagram.com/"
+json_url = "http://instagram.com/{0}/media/?max_id={1}{2}"
 
 time_img_created_regex = r'data-utime=\"(?P<utime>\d+)\"'
+first_page_regex = '\"id\":\"(?P<img_id>\d+)_\d+?\",\"user":\{\"username\":".+?\"'
 
 
 def get_instagram_images(target_usr_list, path='.', thread_num=20):
-
-
 
     for (uid, uname) in target_usr_list:
 
@@ -47,73 +45,79 @@ def get_instagram_images(target_usr_list, path='.', thread_num=20):
         else:
             id_list = [ids.strip() for ids in id_list]
 
-        url = base_url + uid
         session = requests.session()
         session.headers['User-Agent'] = user_agent
-        page = get_page(session, url, retry_times=5)
 
         pic_list = []
         video_list = []
         print 'Parsing...'
 
+        url = web_url + uid
+        logging.info('first page: %s', url)
+        page = get_page(session, url, retry_times=5)
+        
+        if page:
+            first_photo_item = re.search(first_page_regex, page)
+        else:
+            print 'First page error.'
+
+        url = json_url.format(uid, '1', first_photo_item.group('img_id'))
+        page = get_page(session, url, retry_times=5)                    
+
         page_num = 1
         while page is not None:
-            print 'Page %2d...' % page_num
-            soup = BeautifulSoup(page)
+            time_begin = time.time()
+            j_page = json.loads(page)
             page = None
+            tmp_pic_num = 0
+            tmp_video_num = 0
 
-            for photo_item in soup.find_all('div', {'class': 'photoeach clearfix'}):
-
+            for photo_item in j_page['items']:
+                
                 # get caption of the img
-                caption_soup = photo_item.find('div', {'class': 'caption comment_each'})
-                if caption_soup:
-                    caption = clean_filename(caption_soup.strong.get_text())
+                if photo_item['caption']:
+                    caption = clean_filename(photo_item['caption']['text'])
                 else:
                     caption = ''
+                # get created time of the img
 
-                img_page_url = web_url + photo_item.find('a', {'class': 'mainimg'}).get('href')
+                utime = photo_item['created_time']
+                img_time = time.strftime('%Y%m%d%H%M', time.gmtime(float(utime)))
 
-                # get real video url
-                video_element = photo_item.find('a', {'class': 'fancy-video video-link  fancybox.ajax toShow hide'})
-                if video_element is not None:
-
-                    video_url = video_element.get('href')
-
-                    # check if the video had already been downloaded
+                # get multimedia object url
+                if photo_item.has_key('videos'):
+                    video_url = photo_item['videos']['standard_resolution']['url']
                     video_id = video_url.split('/')[-1]
                     if video_id not in id_list:
-                        video_list.append((img_page_url, caption, video_id, video_url))
-                        pic_list.append((img_page_url, caption, video_id, video_url))
-                        logging.info('img_page_url: %s', img_page_url)
+                        video_list.append((img_time, caption, video_id, video_url))
+                        pic_list.append((img_time, caption, video_id, video_url))
+                        tmp_video_num += 1
                         logging.info('%s', caption.encode('cp936', 'ignore'))
                         logging.info('video_url: %s', video_url)
                     else:
                         break
-                    continue
+                        
+                elif photo_item.has_key('images'):
+                    img_url = photo_item['images']['standard_resolution']['url']
+                    img_id =  img_url.split('/')[-1]
+                    if img_id not in id_list:
+                        pic_list.append((img_time, caption, img_id, img_url))
+                        tmp_pic_num += 1
+                        logging.info('%s', caption.encode('cp936', 'ignore'))
+                        logging.info('img_url: %s', img_url)
+                    else:
+                        break
 
-                # get img_id
-                img_real_url = photo_item.find('div', {'class': 'social_buttons pw-widget pw-size-medium pw-counter-show'}).get('pw:image')
-                # check if the img had already been downloaded
-                img_id = img_real_url.split('/')[-1]
-                if img_id not in id_list:
-                    pic_list.append((img_page_url, caption, img_id, img_real_url))
-                    logging.info('img_page_url: %s', img_page_url)
-                    logging.info('%s', caption.encode('cp936', 'ignore'))
-                    logging.info('img_url: %s', img_real_url)
-                else:
-                    break
-
-            # " len(pic_list) >= page_num * PHOTOS_PER_PAGE " means all photos in current page are brand new,
-            # it's neccessary to check next page. Otherwise it's not neccessary.
-            if len(pic_list) >= page_num * PHOTOS_PER_PAGE or isFirsttime:
-                soup_next = soup.find('a', {'rel': 'next'})
-                if soup_next:
-                    link_next = soup_next.get('href')
-                    if link_next:
-                        logging.info("-----------------------------------------------------------------")
-                        logging.info('%s', web_url + link_next)
-                        page = get_page(session, web_url + link_next, retry_times=5)
-
+            if tmp_video_num + tmp_pic_num > 0:
+                if j_page['more_available']:
+                    url = json_url.format(uid, '', photo_item['id'])
+                    page = get_page(session, url, retry_times=5)
+            time_end = time.time()
+            print 'Page %3d:   %2d new (photo: %d, video: %d)  Time used: %.2f secs' % (page_num, 
+                                                                  tmp_video_num + tmp_pic_num, 
+                                                                  tmp_pic_num, 
+                                                                  tmp_video_num,
+                                                                  time_end-time_begin)
             page_num += 1
 
         print ' '
@@ -121,6 +125,9 @@ def get_instagram_images(target_usr_list, path='.', thread_num=20):
 
         if len(pic_list) == 0:
             continue
+
+        # for debug
+        # set_testlist('.', pic_list) 
 
         # 传入整个list的大小，如果大于配置文件中的数值则按 THREAD 数目分片，否则按照 list 大小分片
         pic_list_div = div_list(pic_list, thread_num)
@@ -133,11 +140,10 @@ def get_instagram_images(target_usr_list, path='.', thread_num=20):
             th.start()
         for th in threads:
             th.join()
-     
-        
+
         attempts_times = 1
         while len(retry_list) != 0 and attempts_times < 5:
-            print 'Now retrying download the [ %s ] failed task!!!' % len(retry_list)
+            print 'Now retrying the [ %s ] failed task!!!' % len(retry_list)
             threads = []
             # 分多线程进行重试
             pic_list_div = []
@@ -156,7 +162,7 @@ def get_instagram_images(target_usr_list, path='.', thread_num=20):
         done_list = list(set(pic_list) - set(retry_list))
         set_idlist(sort_dir, list(done_list))
         if len(retry_list)== 0:
-            print 'All %s \'s download job has been done.' % uname
+            print 'All %s \'s download jobs has been done.' % uname
         else:
             print '%d items failed.' % len(retry_list)
 
@@ -177,15 +183,8 @@ def div_list(picname_list, thread_num):
 
 
 def download(session, pic_list, sort_dir):
-    for (img_page_url, caption, picname, pic_url) in pic_list:
+    for (img_time, caption, picname, pic_url) in pic_list:
         try:
-            img_page = get_page(session, img_page_url, retry_times=1)
-
-            # get time the photo created
-            utime = re.search(time_img_created_regex, img_page).group('utime')
-            img_time = time.strftime('%Y%m%d%H%M', time.gmtime(float(utime)))
-            logging.info('img_time: %s', img_time)
-
             # max length of filename including path defined by windows is 256
             # cut the caption str if needed
             cur_dir_length = len(os.path.abspath(sort_dir))
@@ -197,31 +196,26 @@ def download(session, pic_list, sort_dir):
             filename = img_time + '.' + tmp_caption + '.' + picname
             filename = clean_filename(filename)
             fn = os.path.join(sort_dir, filename)
+            logging.info("%s: Begin to retrieve %s.",threading.currentThread(), picname)
             urllib.urlretrieve(pic_url, fn)
-
-            print 'Download ' + picname + ' successful.'
+            logging.info("%s: %s downloaded successfully.",threading.currentThread(), picname)
+            print picname + ' downloaded successfully.'
         except Exception, e:
             print e
             mylock.acquire()
-            retry_list.append((img_page_url, caption, picname, pic_url))
+            retry_list.append((img_time, caption, picname, pic_url))
             mylock.release()
-            print '%s  download failed, add to retry queue!' % picname
+            logging.info("%s: Failed to retrieve %s.",threading.currentThread(), picname)
+            print '%s downloading failed, add to retry queue!' % picname
 
 
 def retry_download(session, picname_list, sort_dir):
     '''
-    retry to download the failed task untile all the image has been dowload successfuly.
+    retry to download the failed task until all images has been dowloaded successfully.
     '''
-    for (img_page_url, caption, picname, pic_url) in picname_list:
+    for (img_time, caption, picname, pic_url) in picname_list:
 
         try:
-            img_page = get_page(session, img_page_url)
-
-            # get time the photo created
-            utime = re.search(time_img_created_regex, img_page).group('utime')
-            img_time = time.strftime('%Y%m%d%H%M', time.gmtime(float(utime)))
-            logging.info('img_time: %s', img_time)
-
             # max length of filename including path defined by windows is 256
             # cut the caption str if needed
             cur_dir_length = len(os.path.abspath(sort_dir))
@@ -237,14 +231,14 @@ def retry_download(session, picname_list, sort_dir):
 
             mylock.acquire()
             try:
-                retry_list.remove((img_page_url, caption, picname, pic_url))
+                retry_list.remove((img_time, caption, picname, pic_url))
             finally:
                 mylock.release()
 
-            print 'Download ' + picname + ' successful.'
+            print picname + 'downloaded successfully.'
         except Exception, e:
             print e
-            print '%s has download failed, add to retry queue!' % picname
+            print '%s downloading failed, add to retry queue!' % picname
 
 
 
@@ -261,13 +255,35 @@ def get_idlist(sort_dir):
 
     return id_list
 
+def set_testlist(sort_dir, ids):
+    ''' store the pic_id into id_list.log
+    '''
+    filename = os.path.join(sort_dir, 'test.log')
+    f = open(filename, 'w')
+
+    slist = [('%s|%s|%s|%s\n' % (img_time, caption, picname, pic_url)).encode('utf8') for (img_time, caption, picname, pic_url) in ids]
+    f.writelines(slist)
+    f.close()
+
+def get_testlist(sort_dir):
+    ''' get the pic_id which has been already downloaded.
+    '''
+    filename = os.path.join(sort_dir, 'test.log')
+    if os.path.exists(filename):
+        f = open(filename, 'r')
+        id_list = f.readlines()
+        f.close()
+    else:
+        id_list = []
+
+    return id_list
 
 def set_idlist(sort_dir, ids):
     ''' store the pic_id into id_list.log
     '''
     filename = os.path.join(sort_dir, 'id_list.log')
     f = open(filename, 'a')
-    ids = [picname + '\n' for (img_page_url, caption, picname, pic_url) in ids]
+    ids = [picname + '\n' for (img_time, caption, picname, pic_url) in ids]
 
     f.writelines(ids)
     f.close()
@@ -307,7 +323,7 @@ def clean_filename(s, minimal_change=True):
     return s
 
 
-def get_page(session, url, retry_times=3, timeout=10):
+def get_page(session, url, retry_times=3, timeout=20):
     """
     Download an HTML page using the requests session.
     """
@@ -319,12 +335,13 @@ def get_page(session, url, retry_times=3, timeout=10):
             r = session.get(url, timeout=timeout)
             r.raise_for_status()
         except Exception as e:
+            logging.error('Exception in get_page: %s', e)
+            logging.info('Error getting page %s, retrying... %d', url, attempts_times)
             if attempts_times >= retry_times:
                 raise
-            logging.info('Error getting page %s, retrying...')
             msg = 'Error getting page, retry in {0} seconds ...'
             interval = 2 ** attempts_times
-            print(msg.format(interval))
+            logging.info(msg.format(interval))
             time.sleep(interval)
             continue
         break
