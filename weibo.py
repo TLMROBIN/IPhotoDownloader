@@ -16,6 +16,8 @@ import time
 import logging
 import errno
 import argparse
+from PIL import Image
+import random
 
 mylock = threading.RLock()
 retry_list = []
@@ -30,12 +32,12 @@ def encrypt_passwd(passwd, pubkey, servertime, nonce):
 def get_weibo_images(target_usr_list, username, password, thread_num=20, path='.'):
     
     WBCLIENT = 'ssologin.js(v1.4.5)'
-    user_agent = (
-        'Mozilla/5.0 (Windows NT 5.1) AppleWebKit/536.11 (KHTML, like Gecko) '
-        'Chrome/20.0.1132.57 Safari/536.11'
+    user_agent = ('Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36'
+                 ' (KHTML, like Gecko) Chrome/39.0.2171.99 Safari/537.36'
     )
     session = requests.session()
     session.headers['User-Agent'] = user_agent
+    session.headers['Accept-Language'] = 'Accept-Language:zh-CN,zh;q=0.8,en;q=0.4'
 
     resp = session.get(
         'http://login.sina.com.cn/sso/prelogin.php?'
@@ -71,13 +73,50 @@ def get_weibo_images(target_usr_list, username, password, thread_num=20, path='.
                'naSSOController.feedBackUrlCallBack',
         'returntype': 'META'
     }
+
+
+
+
+
     resp = session.post(
         'http://login.sina.com.cn/sso/login.php?client=%s' % WBCLIENT,
         data=data
     )
+  
+    # process captcha code if needed
+    while True:
+        login_url = re.search(r'replace\([\"\']([^\'\"]+)[\"\']',
+                                resp.content).group(1)
+        url_d = urllib.unquote(login_url).decode('GBK')
 
-    login_url = re.search(r'replace\([\"\']([^\'\"]+)[\"\']',
-                          resp.content).group(1)
+        if re.search(u'验证码', url_d):
+            get_captcha_url = "http://login.sina.com.cn/cgi/pin.php?r={rand}&s=0&p={pcid}".format(
+            rand=random.randint(100000000, 1000000000), pcid=pre_login['pcid'])
+            print get_captcha_url
+            urllib.urlretrieve(get_captcha_url, 'captcha.jpg')
+            img = Image.open('captcha.jpg')
+            img.show()
+            captcha = raw_input('Input the captcha: ')
+            data['door'] = captcha
+            data['pcid'] = pre_login['pcid']
+
+            nonce = ""
+            for i in range(6):  #@UnusedVariable
+                nonce += random.choice('QWERTYUIOPASDFGHJKLZXCVBNM1234567890')
+
+
+            data['sp'] = encrypt_passwd(password, pre_login['pubkey'],
+                                    pre_login['servertime'], nonce),
+
+            resp = session.post(
+                'http://login.sina.com.cn/sso/login.php?client=%s' % WBCLIENT,
+                data=data   
+                )
+            login_url = re.search(r'replace\([\"\']([^\'\"]+)[\"\']',
+                            resp.content).group(1)
+        else:
+            break
+
     resp = session.get(login_url)
     login_str = re.match(r'[^{]+({.+?}})', resp.content).group(1)
     #return json.loads(login_str)
